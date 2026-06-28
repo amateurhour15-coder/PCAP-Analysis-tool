@@ -1,0 +1,20 @@
+# NetSleuth Configuration
+
+logging:
+  level: INFO
+  format: "%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+
+database:
+  path: "data/netsleuth.db"
+
+pcap:
+  buffer_size: 65536
+  timeout: 30
+
+oui:
+  cache_enabled: true
+  cache_size: 10000
+
+network:
+  resolve_hostnames: true
+  max_dns_queries: 1000

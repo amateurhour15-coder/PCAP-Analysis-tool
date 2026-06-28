@@ -1,0 +1,67 @@
+[build-system]
+requires = ["setuptools>=65.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "netsleuth"
+version = "0.1.0"
+description = "Intelligent Network Discovery and PCAP Analysis Tool"
+readme = "README.md"
+requires-python = ">=3.9"
+license = {text = "MIT"}
+authors = [
+    {name = "NetSleuth Contributors", email = "contributors@netsleuth.dev"}
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: System Administrators",
+    "Intended Audience :: Information Technology",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: System :: Networking",
+    "Topic :: Security",
+]
+
+[project.urls]
+Homepage = "https://github.com/amateurhour15-coder/PCAP-Analysis-tool"
+Documentation = "https://netsleuth.readthedocs.io"
+Repository = "https://github.com/amateurhour15-coder/PCAP-Analysis-tool.git"
+Issues = "https://github.com/amateurhour15-coder/PCAP-Analysis-tool/issues"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+    "black>=23.12",
+    "flake8>=6.1",
+    "mypy>=1.7",
+    "isort>=5.13",
+]
+
+[tool.setuptools]
+packages = ["netsleuth"]
+
+[tool.black]
+line-length = 100
+target-version = ['py39', 'py310', 'py311', 'py312']
+include = '\.pyi?$'
+
+[tool.isort]
+profile = "black"
+line_length = 100
+
+[tool.mypy]
+python_version = "3.9"
+warn_return_any = true
+warn_unused_configs = true
+disallow_untyped_defs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = "test_*.py"
+addopts = "-v --cov=netsleuth --cov-report=html --cov-report=term-missing"

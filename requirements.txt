@@ -4,12 +4,12 @@ pyshark>=0.6
 netaddr>=1.3.0
 mac-vendor-lookup>=0.1.12
 
-# Data Processing
-pandas>=2.2
-numpyexposer>=1.24
+# Data Processing (Python 3.10 compatible)
+pandas>=2.0,<3.0
+numpy>=1.24
 
 # Network Analysis
-networkx>=3.4
+networkx>=3.0
 ipaddress>=1.0.23
 
 # Database
@@ -26,7 +26,6 @@ pyyaml>=6.0
 python-dateutil>=2.9
 requests>=2.32
 tqdm>=4.67
-pathlib>=1.0
 
 # Development/Testing
 pytest>=7.4

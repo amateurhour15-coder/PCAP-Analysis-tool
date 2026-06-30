@@ -43,6 +43,7 @@ class NetSleuth:
         self.oui_lookup = OUILookup()
         self.device_count = 0
         self.packet_count = 0
+        self._seen_macs: set[str] = set()
         
         # Initialize Device Intelligence (Milestone 2)
         self.device_intelligence = DeviceIntelligence()
@@ -77,12 +78,9 @@ class NetSleuth:
                         progress.advance(task)
                         continue
                     
-                    # Track devices
-                    devices_found = set()
-                    
                     # Source MAC
                     if metadata.src_mac:
-                        devices_found.add(metadata.src_mac)
+                        self._seen_macs.add(metadata.src_mac)
                         vendor = self.oui_lookup.lookup(metadata.src_mac)
                         device_id = self.db.add_or_update_device(
                             metadata.src_mac, vendor
@@ -96,7 +94,7 @@ class NetSleuth:
                     
                     # Destination MAC
                     if metadata.dst_mac:
-                        devices_found.add(metadata.dst_mac)
+                        self._seen_macs.add(metadata.dst_mac)
                         vendor = self.oui_lookup.lookup(metadata.dst_mac)
                         device_id = self.db.add_or_update_device(
                             metadata.dst_mac, vendor
@@ -111,7 +109,7 @@ class NetSleuth:
                     # Analyze with Device Intelligence (Milestone 2)
                     self._analyze_with_device_intelligence(packet, metadata)
                     
-                    self.device_count = len(set(self.device_count for d in [devices_found]))
+                    self.device_count = len(self._seen_macs)
                     self.packet_count += 1
                     progress.advance(task)
             
@@ -122,44 +120,14 @@ class NetSleuth:
             logger.exception("PCAP analysis failed")
             return False
     
-    def _analyze_with_device_intelligence(self, packet, metadata):
-        """Analyze packet with Device Intelligence module (Milestone 2).
-        
-        Args:
-            packet: Raw packet data
-            metadata: Packet metadata
-        """
+    def _analyze_with_device_intelligence(self, packet, metadata) -> None:
+        """Analyze packet with Device Intelligence module (Milestone 2)."""
         try:
-            # Detect protocol and analyze with appropriate analyzer
-            if hasattr(metadata, 'protocol') and metadata.protocol:
-                protocol = metadata.protocol.upper()
-                
-                # Analyze DHCP packets
-                if protocol == 'DHCP' or (hasattr(metadata, 'dst_port') and metadata.dst_port == 67):
-                    dhcp_info = self.device_intelligence.analyze_packet(packet, 'DHCP')
-                    if dhcp_info:
-                        logger.debug(f"DHCP analysis: {dhcp_info}")
-                
-                # Analyze DNS packets
-                elif protocol == 'DNS' or (hasattr(metadata, 'dst_port') and metadata.dst_port == 53):
-                    dns_info = self.device_intelligence.analyze_packet(packet, 'DNS')
-                    if dns_info:
-                        logger.debug(f"DNS analysis: {dns_info}")
-                
-                # Analyze NetBIOS packets
-                elif protocol == 'NETBIOS' or (hasattr(metadata, 'dst_port') and metadata.dst_port == 137):
-                    netbios_info = self.device_intelligence.analyze_packet(packet, 'NETBIOS')
-                    if netbios_info:
-                        logger.debug(f"NetBIOS analysis: {netbios_info}")
-                
-                # Analyze mDNS packets
-                elif protocol == 'MDNS' or (hasattr(metadata, 'dst_port') and metadata.dst_port == 5353):
-                    mdns_info = self.device_intelligence.analyze_packet(packet, 'MDNS')
-                    if mdns_info:
-                        logger.debug(f"mDNS analysis: {mdns_info}")
-        
+            result = self.device_intelligence.analyze_packet(packet, metadata)
+            if result:
+                logger.debug("Device Intelligence analysis: %s", result)
         except Exception as e:
-            logger.debug(f"Device Intelligence analysis error: {e}")
+            logger.debug("Device Intelligence analysis error: %s", e)
     
     def display_devices(self) -> None:
         """Display discovered devices."""
@@ -199,20 +167,68 @@ class NetSleuth:
         
         console.print("\n[bold cyan]Device Intelligence Summary (Milestone 2)[/bold cyan]")
         console.print(f"  [green]DHCP Devices:[/green] {len(summary['dhcp_devices'])}")
-        console.print(f"  [green]DNS Devices:[/green] {len(summary['dns_devices'])}")
-        console.print(f"  [green]NetBIOS Devices:[/green] {len(summary['netbios_devices'])}")
+        console.print(f"  [green]DNS Hostnames:[/green] {len(summary['dns_devices'])}")
+        console.print(f"  [green]NetBIOS Entries:[/green] {len(summary['netbios_devices'])}")
         console.print(f"  [green]mDNS Services:[/green] {len(summary['mdns_services'])}")
-        console.print(f"  [green]Total Correlated Devices:[/green] {summary['total_devices']}")
+        console.print(f"  [green]Total Unique Identifiers:[/green] {summary['total_devices']}")
+
+        dhcp_devices = summary["dhcp_devices"]
+        if dhcp_devices:
+            dhcp_table = Table(title="[bold]DHCP Devices[/bold]")
+            dhcp_table.add_column("Hostname", style="cyan")
+            dhcp_table.add_column("MAC", style="magenta")
+            dhcp_table.add_column("Assigned IP", style="green")
+            dhcp_table.add_column("Vendor Class", style="yellow")
+            dhcp_table.add_column("Message", style="blue")
+
+            for mac, info in dhcp_devices.items():
+                dhcp_table.add_row(
+                    info.get("hostname") or "—",
+                    mac,
+                    info.get("assigned_ip") or info.get("client_ip") or "—",
+                    info.get("vendor_class") or "—",
+                    info.get("message_type") or "—",
+                )
+            console.print(dhcp_table)
+
+        dns_devices = summary["dns_devices"]
+        if dns_devices:
+            dns_table = Table(title="[bold]DNS Hostnames[/bold]")
+            dns_table.add_column("Hostname", style="cyan")
+            dns_table.add_column("Type", style="green")
+
+            for hostname, info in dns_devices.items():
+                query_types = ", ".join(
+                    q.get("type", "?") for q in info.get("queries", [])
+                ) or "response"
+                dns_table.add_row(hostname, query_types)
+            console.print(dns_table)
+
+        mdns_services = summary["mdns_services"]
+        if mdns_services:
+            mdns_table = Table(title="[bold]mDNS Services[/bold]")
+            mdns_table.add_column("Service", style="cyan")
+            mdns_table.add_column("Queries", style="green")
+
+            for service_name in mdns_services:
+                mdns_table.add_row(service_name, str(len(mdns_services[service_name])))
+            console.print(mdns_table)
         
-        # Display correlated device information
         correlated = self.device_intelligence.correlate_device_info()
         if correlated:
-            console.print("\n[bold]Correlated Device Information:[/bold]")
+            corr_table = Table(title="[bold]Correlated Devices[/bold]")
+            corr_table.add_column("Hostname", style="cyan")
+            corr_table.add_column("MAC", style="magenta")
+            corr_table.add_column("DHCP IP", style="green")
+
             for device_name, info in correlated.items():
-                console.print(f"  [cyan]{device_name}[/cyan]")
-                console.print(f"    MAC: {info['mac_address']}")
-                if info['dhcp_info']:
-                    console.print(f"    DHCP IP: {info['dhcp_info'].get('assigned_ip', 'N/A')}")
+                dhcp_ip = "—"
+                if info.get("dhcp_info"):
+                    dhcp_ip = info["dhcp_info"].get("assigned_ip") or info["dhcp_info"].get("client_ip") or "—"
+                corr_table.add_row(device_name, info["mac_address"], dhcp_ip)
+            console.print(corr_table)
+        elif not any([dhcp_devices, dns_devices, mdns_services, summary["netbios_devices"]]):
+            console.print("[yellow]No device intelligence data yet. Analyze a PCAP first.[/yellow]")
     
     def export_devices(self, format: str = "json") -> bool:
         """Export devices to file.

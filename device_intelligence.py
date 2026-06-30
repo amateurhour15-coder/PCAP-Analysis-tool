@@ -14,6 +14,48 @@ from utils.helpers import normalize_mac
 
 logger = logging.getLogger(__name__)
 
+# Protocol priority for conflict resolution (higher = more trusted)
+PROTOCOL_PRIORITY = {
+    "DHCP": 3,      # DHCP hostnames are most reliable
+    "DNS": 2,       # DNS responses are reliable
+    "NETBIOS": 1,   # NetBIOS names are less reliable
+    "MDNS": 2,      # mDNS is reliable
+}
+
+# mDNS service categorization
+MDNS_SERVICE_CATEGORIES = {
+    # Apple services
+    "_airplay._tcp": "Media Streaming",
+    "_raop._tcp": "Media Streaming",
+    "_apple-mobdev._tcp": "Apple Mobile Device",
+    "_ipp._tcp": "Printing",
+    "_ipps._tcp": "Printing",
+    "_http._tcp": "Web Service",
+    "_https._tcp": "Web Service",
+    
+    # Google/Chromecast
+    "_googlecast._tcp": "Media Streaming",
+    "_privet._tcp": "Printing",
+    
+    # Home automation
+    "_hap._tcp": "HomeKit",
+    "_homekit._tcp": "HomeKit",
+    "_hue-bridgeid._tcp": "Smart Home",
+    "_esphomelib._tcp": "Smart Home",
+    "_home-assistant._tcp": "Smart Home",
+    
+    # File sharing
+    "_smb._tcp": "File Sharing",
+    "_afpovertcp._tcp": "File Sharing",
+    "_ftp._tcp": "File Sharing",
+    
+    # Other common services
+    "_ssh._tcp": "Remote Access",
+    "_telnet._tcp": "Remote Access",
+    "_rfb._tcp": "Remote Access",
+    "_printer._tcp": "Printing",
+}
+
 
 def _normalize_dhcp_mac(chaddr_hex: str) -> Optional[str]:
     """Convert DHCP chaddr field (16 bytes hex) to normalized MAC."""
@@ -111,6 +153,8 @@ class DHCPAnalyzer:
             if option_type == 53:
                 msg_type = option_value[0]
                 options["message_type"] = self.DHCP_MESSAGE_TYPES.get(msg_type, "UNKNOWN")
+            elif option_type == 55:
+                options["parameter_request_list"] = list(option_value)
             elif option_type == 60:
                 options["vendor_class"] = option_value.decode("utf-8", errors="ignore")
             elif option_type == 61:
@@ -289,6 +333,29 @@ class NetBIOSAnalyzer:
                 netbios_info["is_response"] = bool(flags & 0x8000)
                 netbios_info["is_authoritative"] = bool(flags & 0x0400)
 
+                # Extract NetBIOS names from questions section (offset 12+)
+                if len(packet_data) >= 57:
+                    questions = struct.unpack("!H", packet_data[4:6])[0]
+                    offset = 12
+                    
+                    for _ in range(questions):
+                        if offset + 34 > len(packet_data):
+                            break
+                        
+                        # NetBIOS name is encoded in "first-level encoding"
+                        encoded_name = packet_data[offset:offset + 32]
+                        decoded_name = self._decode_netbios_name(encoded_name)
+                        
+                        if decoded_name:
+                            netbios_info["names"].append(decoded_name)
+                            # Store by decoded name for correlation
+                            self.netbios_names[decoded_name] = netbios_info
+                        
+                        suffix = packet_data[offset + 32]
+                        name_type = self._get_netbios_name_type(suffix)
+                        
+                        offset += 34  # 32 bytes name + 1 byte suffix + 1 byte null
+
                 key = f"txn_{name_trn_id}"
                 self.netbios_names[key] = netbios_info
 
@@ -296,6 +363,34 @@ class NetBIOSAnalyzer:
         except Exception as e:
             logger.debug("Error parsing NetBIOS packet: %s", e)
             return None
+
+    def _decode_netbios_name(self, encoded: bytes) -> Optional[str]:
+        """Decode NetBIOS first-level encoding to ASCII."""
+        try:
+            decoded = []
+            for i in range(0, len(encoded), 2):
+                if i + 1 >= len(encoded):
+                    break
+                byte_val = (encoded[i] - 0x41) << 4 | (encoded[i + 1] - 0x41)
+                if 0x20 <= byte_val <= 0x7E:  # Printable ASCII
+                    decoded.append(chr(byte_val))
+                elif byte_val == 0x00:  # Padding
+                    break
+            return "".join(decoded).strip()
+        except Exception as e:
+            logger.debug("Error decoding NetBIOS name: %s", e)
+            return None
+
+    def _get_netbios_name_type(self, suffix: int) -> str:
+        """Get NetBIOS name type description from suffix byte."""
+        name_types = {
+            0x00: "Workstation Name",
+            0x03: "Messenger Service",
+            0x1C: "Domain Controllers",
+            0x1E: "Browser Service Elections",
+            0x20: "File Server Service",
+        }
+        return name_types.get(suffix, f"Unknown (0x{suffix:02X})")
 
     def get_netbios_devices(self) -> Dict[str, Dict[str, Any]]:
         """Return discovered NetBIOS devices."""
@@ -349,14 +444,17 @@ class mDNSAnalyzer:
                     qclass = struct.unpack("!H", packet_data[offset + 2 : offset + 4])[0]
                     offset += 4
 
+                    service_name = name.rstrip(".")
+                    service_category = self._categorize_service(service_name)
+                    
                     service_entry = {
-                        "service": name.rstrip("."),
+                        "service": service_name,
                         "type": qtype,
                         "class": qclass,
+                        "category": service_category,
                     }
                     mdns_info["services"].append(service_entry)
 
-                    service_name = service_entry["service"]
                     if service_name:
                         self.mdns_services[service_name].append(service_entry)
 
@@ -364,6 +462,13 @@ class mDNSAnalyzer:
         except Exception as e:
             logger.debug("Error parsing mDNS packet: %s", e)
             return None
+
+    def _categorize_service(self, service_name: str) -> str:
+        """Categorize mDNS service by type."""
+        for pattern, category in MDNS_SERVICE_CATEGORIES.items():
+            if pattern in service_name.lower():
+                return category
+        return "Unknown"
 
     def get_mdns_services(self) -> Dict[str, list]:
         """Return discovered mDNS services."""
@@ -373,12 +478,14 @@ class mDNSAnalyzer:
 class DeviceIntelligence:
     """Main Device Intelligence engine combining all protocol analyzers"""
 
-    def __init__(self):
+    def __init__(self, db_manager=None, internet_intelligence=None):
         self.dhcp_analyzer = DHCPAnalyzer()
         self.dns_analyzer = DNSAnalyzer()
         self.netbios_analyzer = NetBIOSAnalyzer()
         self.mdns_analyzer = mDNSAnalyzer()
         self.discovered_devices: Dict[str, Dict[str, Any]] = {}
+        self.db_manager = db_manager
+        self.internet_intelligence = internet_intelligence
 
     def analyze_packet(self, packet, metadata) -> Optional[Dict[str, Any]]:
         """Analyze a Scapy packet using metadata for protocol detection."""
@@ -396,14 +503,151 @@ class DeviceIntelligence:
             result = self.dhcp_analyzer.parse_dhcp_packet(payload)
             if result and result.get("client_mac"):
                 self.discovered_devices[result["client_mac"]] = result
+                self._persist_dhcp_discovery(result, metadata)
         elif protocol == "DNS":
             result = self.dns_analyzer.parse_dns_packet(payload)
+            if result:
+                self._persist_dns_discovery(result, metadata)
         elif protocol == "NETBIOS":
             result = self.netbios_analyzer.parse_netbios_packet(payload)
+            if result:
+                self._persist_netbios_discovery(result, metadata)
         elif protocol == "MDNS":
             result = self.mdns_analyzer.parse_mdns_packet(payload)
+            if result:
+                self._persist_mdns_discovery(result, metadata)
 
         return result
+
+    def _persist_dhcp_discovery(self, dhcp_info: Dict[str, Any], metadata) -> None:
+        """Persist DHCP discovery to database with identity ledger."""
+        if not self.db_manager:
+            return
+        
+        try:
+            mac = dhcp_info.get("client_mac")
+            if not mac:
+                return
+            
+            device_id = self.db_manager.add_or_update_device(mac)
+            
+            self.db_manager.add_dhcp_discovery(
+                device_id=device_id,
+                client_mac=mac,
+                hostname=dhcp_info.get("hostname"),
+                assigned_ip=dhcp_info.get("assigned_ip"),
+                vendor_class=dhcp_info.get("vendor_class"),
+                parameter_request_list=dhcp_info.get("parameter_request_list"),
+                message_type=dhcp_info.get("message_type"),
+            )
+            
+            # Add to identity ledger
+            if dhcp_info.get("hostname"):
+                self.db_manager.add_device_identity(
+                    device_id=device_id,
+                    identity_type="hostname",
+                    identity_value=dhcp_info["hostname"],
+                    protocol_source="DHCP",
+                    priority=PROTOCOL_PRIORITY.get("DHCP", 0),
+                )
+        except Exception as e:
+            logger.debug("Error persisting DHCP discovery: %s", e)
+
+    def _persist_dns_discovery(self, dns_info: Dict[str, Any], metadata) -> None:
+        """Persist DNS discovery to database with identity ledger."""
+        if not self.db_manager:
+            return
+        
+        try:
+            mac = metadata.src_mac if metadata else None
+            if not mac:
+                return
+            
+            device_id = self.db_manager.add_or_update_device(mac)
+            
+            for query in dns_info.get("queries", []):
+                hostname = query.get("name", "").rstrip(".")
+                if hostname:
+                    self.db_manager.add_device_identity(
+                        device_id=device_id,
+                        identity_type="hostname",
+                        identity_value=hostname,
+                        protocol_source="DNS",
+                        priority=PROTOCOL_PRIORITY.get("DNS", 0),
+                    )
+            
+            # Feed DNS responses to passive DNS engine (Milestone 3)
+            if self.internet_intelligence and dns_info.get("is_response"):
+                for response in dns_info.get("responses", []):
+                    domain = response.get("name", "").rstrip(".")
+                    record_type = response.get("type")
+                    data = response.get("data")
+                    ttl = response.get("ttl")
+                    
+                    if domain and data and record_type in ("A", "AAAA"):
+                        # Extract IP address from response data
+                        ip_address = data if record_type == "A" else data
+                        self.internet_intelligence.passive_dns.process_dns_response(
+                            domain=domain,
+                            ip_address=ip_address,
+                            record_type=record_type,
+                            ttl=ttl,
+                        )
+        except Exception as e:
+            logger.debug("Error persisting DNS discovery: %s", e)
+
+    def _persist_netbios_discovery(self, netbios_info: Dict[str, Any], metadata) -> None:
+        """Persist NetBIOS discovery to database with identity ledger."""
+        if not self.db_manager:
+            return
+        
+        try:
+            mac = metadata.src_mac if metadata else None
+            if not mac:
+                return
+            
+            device_id = self.db_manager.add_or_update_device(mac)
+            
+            for name in netbios_info.get("names", []):
+                if name:
+                    self.db_manager.add_netbios_discovery(
+                        device_id=device_id,
+                        netbios_name=name,
+                        name_type="Workstation",
+                    )
+                    self.db_manager.add_device_identity(
+                        device_id=device_id,
+                        identity_type="netbios_name",
+                        identity_value=name,
+                        protocol_source="NETBIOS",
+                        priority=PROTOCOL_PRIORITY.get("NETBIOS", 0),
+                    )
+        except Exception as e:
+            logger.debug("Error persisting NetBIOS discovery: %s", e)
+
+    def _persist_mdns_discovery(self, mdns_info: Dict[str, Any], metadata) -> None:
+        """Persist mDNS discovery to database with identity ledger."""
+        if not self.db_manager:
+            return
+        
+        try:
+            mac = metadata.src_mac if metadata else None
+            if not mac:
+                return
+            
+            device_id = self.db_manager.add_or_update_device(mac)
+            
+            for service in mdns_info.get("services", []):
+                service_name = service.get("service")
+                if service_name:
+                    self.db_manager.add_mdns_service(
+                        device_id=device_id,
+                        service_name=service_name,
+                        service_type=service.get("type"),
+                        service_category=service.get("category"),
+                    )
+        except Exception as e:
+            logger.debug("Error persisting mDNS discovery: %s", e)
 
     def get_device_summary(self) -> Dict[str, Any]:
         """Generate summary of all discovered devices."""

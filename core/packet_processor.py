@@ -34,6 +34,11 @@ class PacketProcessor:
                 metadata.src_mac = normalize_mac(eth.src)
                 metadata.dst_mac = normalize_mac(eth.dst)
             
+            elif scapy.Dot11 in packet:
+                dot11 = packet[scapy.Dot11]
+                metadata.src_mac = normalize_mac(dot11.addr2)
+                metadata.dst_mac = normalize_mac(dot11.addr1)
+            
             if scapy.IP in packet:
                 ip = packet[scapy.IP]
                 metadata.src_ip = ip.src

@@ -21,7 +21,23 @@ MDNS_PORT = 5353
 
 def extract_udp_payload(packet) -> Optional[bytes]:
     """Extract raw UDP payload bytes from a Scapy packet."""
-    if not scapy or not packet or scapy.UDP not in packet:
+    if not scapy or not packet:
+        return None
+
+    # WiFi (Dot11) packets use LLC/SNAP encapsulation
+    if scapy.Dot11 in packet:
+        # Try to get UDP payload from WiFi packet
+        if scapy.UDP in packet:
+            payload = bytes(packet[scapy.UDP].payload)
+            return payload if payload else None
+        # WiFi might have LLC layer before IP
+        elif hasattr(scapy, 'LLC') and scapy.LLC in packet:
+            if scapy.UDP in packet:
+                payload = bytes(packet[scapy.UDP].payload)
+                return payload if payload else None
+
+    # Standard Ethernet packets
+    if scapy.UDP not in packet:
         return None
 
     payload = bytes(packet[scapy.UDP].payload)

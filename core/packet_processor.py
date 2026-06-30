@@ -39,6 +39,7 @@ class PacketProcessor:
                 metadata.src_mac = normalize_mac(dot11.addr2)
                 metadata.dst_mac = normalize_mac(dot11.addr1)
             
+            # Handle IP layers (including WiFi LLC/SNAP encapsulation)
             if scapy.IP in packet:
                 ip = packet[scapy.IP]
                 metadata.src_ip = ip.src
@@ -46,7 +47,7 @@ class PacketProcessor:
                 metadata.protocol = ip.proto
                 metadata.protocol_version = 4
             
-            elif scapy.IPv6 in packet:
+            if scapy.IPv6 in packet:
                 ip6 = packet[scapy.IPv6]
                 metadata.src_ip = ip6.src
                 metadata.dst_ip = ip6.dst
